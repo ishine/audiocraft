@@ -14,15 +14,15 @@ from pathlib import Path
 import logging
 import typing as tp
 
-import numpy as np
 import soundfile
 import torch
 from torch.nn import functional as F
-import torchaudio as ta
 
 import av
+import av.audio
+import subprocess as sp
 
-from .audio_utils import f32_pcm, i16_pcm, normalize_audio
+from .audio_utils import f32_pcm, normalize_audio
 
 
 _av_initialized = False
@@ -49,9 +49,12 @@ def _av_info(filepath: tp.Union[str, Path]) -> AudioFileInfo:
     with av.open(str(filepath)) as af:
         stream = af.streams.audio[0]
         sample_rate = stream.codec_context.sample_rate
+        assert stream.time_base is not None
+        assert stream.duration is not None
         duration = float(stream.duration * stream.time_base)
         channels = stream.channels
         return AudioFileInfo(sample_rate, duration, channels)
+    assert False  # mypy is stupid
 
 
 def _soundfile_info(filepath: tp.Union[str, Path]) -> AudioFileInfo:
@@ -83,6 +86,8 @@ def _av_read(filepath: tp.Union[str, Path], seek_time: float = 0, duration: floa
     _init_av()
     with av.open(str(filepath)) as af:
         stream = af.streams.audio[0]
+        assert isinstance(stream, av.audio.stream.AudioStream)
+        assert stream.time_base is not None
         sr = stream.codec_context.sample_rate
         num_frames = int(sr * duration) if duration >= 0 else -1
         frame_offset = int(sr * seek_time)
@@ -92,6 +97,8 @@ def _av_read(filepath: tp.Union[str, Path], seek_time: float = 0, duration: floa
         frames = []
         length = 0
         for frame in af.decode(streams=stream.index):
+            assert isinstance(frame, av.audio.frame.AudioFrame)
+            assert frame.pts is not None
             current_offset = int(frame.rate * frame.pts * frame.time_base)
             strip = max(0, frame_offset - current_offset)
             buf = torch.from_numpy(frame.to_ndarray())
@@ -111,6 +118,7 @@ def _av_read(filepath: tp.Union[str, Path], seek_time: float = 0, duration: floa
         if num_frames > 0:
             wav = wav[:, :num_frames]
         return f32_pcm(wav), sr
+    assert False  # mypy is stupid
 
 
 def audio_read(filepath: tp.Union[str, Path], seek_time: float = 0.,
@@ -131,17 +139,11 @@ def audio_read(filepath: tp.Union[str, Path], seek_time: float = 0.,
         info = _soundfile_info(filepath)
         frames = -1 if duration <= 0 else int(duration * info.sample_rate)
         frame_offset = int(seek_time * info.sample_rate)
-        wav, sr = soundfile.read(filepath, start=frame_offset, frames=frames, dtype=np.float32)
+        wav_np, sr = soundfile.read(filepath, start=frame_offset, frames=frames, dtype='float32')
         assert info.sample_rate == sr, f"Mismatch of sample rates {info.sample_rate} {sr}"
-        wav = torch.from_numpy(wav).t().contiguous()
+        wav = torch.from_numpy(wav_np).t().contiguous()
         if len(wav.shape) == 1:
             wav = torch.unsqueeze(wav, 0)
-    elif (
-        fp.suffix in ['.wav', '.mp3'] and fp.suffix[1:] in ta.utils.sox_utils.list_read_formats()
-        and duration <= 0 and seek_time == 0
-    ):
-        # Torchaudio is faster if we load an entire file at once.
-        wav, sr = ta.load(fp)
     else:
         wav, sr = _av_read(filepath, seek_time, duration)
     if pad and duration > 0:
@@ -150,10 +152,22 @@ def audio_read(filepath: tp.Union[str, Path], seek_time: float = 0.,
     return wav, sr
 
 
+def _piping_to_ffmpeg(out_path: tp.Union[str, Path], wav: torch.Tensor, sample_rate: int, flags: tp.List[str]):
+    # ffmpeg is always installed and torchaudio is a bit unstable lately, so let's bypass it entirely.
+    assert wav.dim() == 2, wav.shape
+    command = [
+        'ffmpeg',
+        '-loglevel', 'error',
+        '-y', '-f', 'f32le', '-ar', str(sample_rate), '-ac', str(wav.shape[0]),
+        '-i', '-'] + flags + [str(out_path)]
+    input_ = f32_pcm(wav).t().detach().cpu().numpy().tobytes()
+    sp.run(command, input=input_, check=True)
+
+
 def audio_write(stem_name: tp.Union[str, Path],
                 wav: torch.Tensor, sample_rate: int,
-                format: str = 'wav', mp3_rate: int = 320, normalize: bool = True,
-                strategy: str = 'peak', peak_clip_headroom_db: float = 1,
+                format: str = 'wav', mp3_rate: int = 320, ogg_rate: tp.Optional[int] = None,
+                normalize: bool = True, strategy: str = 'peak', peak_clip_headroom_db: float = 1,
                 rms_headroom_db: float = 18, loudness_headroom_db: float = 14,
                 loudness_compressor: bool = False,
                 log_clipping: bool = True, make_parent_dir: bool = True,
@@ -164,8 +178,9 @@ def audio_write(stem_name: tp.Union[str, Path],
         stem_name (str or Path): Filename without extension which will be added automatically.
         wav (torch.Tensor): Audio data to save.
         sample_rate (int): Sample rate of audio data.
-        format (str): Either "wav" or "mp3".
+        format (str): Either "wav", "mp3", "ogg", or "flac".
         mp3_rate (int): kbps when using mp3s.
+        ogg_rate (int): kbps when using ogg/vorbis. If not provided, let ffmpeg decide for itself.
         normalize (bool): if `True` (default), normalizes according to the prescribed
             strategy (see after). If `False`, the strategy is only used in case clipping
             would happen.
@@ -193,14 +208,20 @@ def audio_write(stem_name: tp.Union[str, Path],
                           rms_headroom_db, loudness_headroom_db, loudness_compressor,
                           log_clipping=log_clipping, sample_rate=sample_rate,
                           stem_name=str(stem_name))
-    kwargs: dict = {}
     if format == 'mp3':
         suffix = '.mp3'
-        kwargs.update({"compression": mp3_rate})
+        flags = ['-f', 'mp3', '-c:a', 'libmp3lame', '-b:a', f'{mp3_rate}k']
     elif format == 'wav':
-        wav = i16_pcm(wav)
         suffix = '.wav'
-        kwargs.update({"encoding": "PCM_S", "bits_per_sample": 16})
+        flags = ['-f', 'wav', '-c:a', 'pcm_s16le']
+    elif format == 'ogg':
+        suffix = '.ogg'
+        flags = ['-f', 'ogg', '-c:a', 'libvorbis']
+        if ogg_rate is not None:
+            flags += ['-b:a', f'{ogg_rate}k']
+    elif format == 'flac':
+        suffix = '.flac'
+        flags = ['-f', 'flac']
     else:
         raise RuntimeError(f"Invalid format {format}. Only wav or mp3 are supported.")
     if not add_suffix:
@@ -209,7 +230,7 @@ def audio_write(stem_name: tp.Union[str, Path],
     if make_parent_dir:
         path.parent.mkdir(exist_ok=True, parents=True)
     try:
-        ta.save(path, wav, sample_rate, **kwargs)
+        _piping_to_ffmpeg(path, wav, sample_rate, flags)
     except Exception:
         if path.exists():
             # we do not want to leave half written files around.

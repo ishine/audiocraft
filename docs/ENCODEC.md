@@ -1,7 +1,7 @@
 # EnCodec: High Fidelity Neural Audio Compression
 
 AudioCraft provides the training code for EnCodec, a state-of-the-art deep learning
-based audio codec supporting both mono stereo audio, presented in the
+based audio codec supporting both mono and stereo audio, presented in the
 [High Fidelity Neural Audio Compression][arxiv] paper.
 Check out our [sample page][encodec_samples].
 
@@ -13,6 +13,11 @@ and used with the [EnCodec repository](https://github.com/facebookresearch/encod
 **Note**: We do not guarantee compatibility between the AudioCraft and EnCodec codebases
 and released checkpoints at this stage.
 
+## EnCodec-MMD
+
+We provide the implementation for EnCodec-MMD, a variant of EnCodec where the independence
+between RVQ codebooks is maximized for better music generation modeling accuracy.
+See [the dedicated section](MMD.md) and our [ICML paper][ICML_arxiv].
 
 ## Installation
 
@@ -26,7 +31,7 @@ task to train an EnCodec model. Specifically, it trains an encoder-decoder with 
 bottleneck - a SEANet encoder-decoder with Residual Vector Quantization bottleneck for EnCodec -
 using a combination of objective and perceptual losses in the forms of discriminators.
 
-The default configuration matches a causal EnCodec training with at a single bandwidth.
+The default configuration matches a causal EnCodec training at a single bandwidth.
 
 ### Example configuration and grids
 
@@ -45,7 +50,7 @@ dora grid compression.encodec_base_24khz
 dora grid compression.encodec_musicgen_32khz
 ```
 
-### Training and valid stages
+### Training and validation stages
 
 The model is trained using a combination of objective and perceptual losses.
 More specifically, EnCodec is trained with the MS-STFT discriminator along with
@@ -54,7 +59,7 @@ the different losses, in an intuitive manner.
 
 ### Evaluation stage
 
-Evaluations metrics for audio generation:
+Evaluation metrics for audio generation:
 * SI-SNR: Scale-Invariant Signal-to-Noise Ratio.
 * ViSQOL: Virtual Speech Quality Objective Listener.
 
@@ -110,8 +115,9 @@ import logging
 import os
 import sys
 
-# uncomment the following line if you want some detailed logs when loading a Solver.
-logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+# Uncomment the following line if you want some detailed logs when loading a Solver.
+# logging.basicConfig(stream=sys.stderr, level=logging.INFO)
+
 # You must always run the following function from the root directory.
 os.chdir(Path(train.__file__).parent.parent)
 
@@ -126,10 +132,10 @@ solver.dataloaders
 ### Importing / Exporting models
 
 At the moment we do not have a definitive workflow for exporting EnCodec models, for
-instance to Hugging Face (HF). We are working on supporting automatic convertion between
+instance to Hugging Face (HF). We are working on supporting automatic conversion between
 AudioCraft and Hugging Face implementations.
 
-We still have some support for fine tuning an EnCodec model coming from HF in AudioCraft,
+We still have some support for fine-tuning an EnCodec model coming from HF in AudioCraft,
 using for instance `continue_from=//pretrained/facebook/encodec_32k`.
 
 An AudioCraft checkpoint can be exported in a more compact format (excluding the optimizer etc.)
@@ -148,11 +154,11 @@ from audiocraft.models import CompressionModel
 model = CompressionModel.get_pretrained('/checkpoints/my_audio_lm/compression_state_dict.bin')
 
 from audiocraft.solvers import CompressionSolver
-# The two are strictly equivalent, but this function supports also loading from non already exported models.
+# The two are strictly equivalent, but this function supports also loading from non-already exported models.
 model = CompressionSolver.model_from_checkpoint('//pretrained//checkpoints/my_audio_lm/compression_state_dict.bin')
 ```
 
-We will see then how to use this model as a tokenizer for MusicGen/Audio gen in the
+We will see then how to use this model as a tokenizer for MusicGen/AudioGen in the
 [MusicGen documentation](./MUSICGEN.md).
 
 ### Learn more
@@ -177,3 +183,4 @@ See license information in the [README](../README.md).
 
 [arxiv]: https://arxiv.org/abs/2210.13438
 [encodec_samples]: https://ai.honu.io/papers/encodec/samples.html
+[ICML_arxiv]: https://arxiv.org/abs/xxxx.xxxxx
